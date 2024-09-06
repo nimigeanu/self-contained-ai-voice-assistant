@@ -1,0 +1,386 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CloudFormation template to deploy and configure an open source self contained AI voice assistant
+
+Parameters:
+  DomainName:
+    Type: String
+    Description: A domain name for which you have full DNS access; the server will be hosted on a subdomain derived from this domain, named after the stack name.
+  IsRoute53Managed:
+    Description: "Is the domain managed by Route 53? (yes or no)"
+    Type: String
+    AllowedValues: 
+      - "yes"
+      - "no"
+    Default: "yes"
+  InstanceType:
+    Description: Server Instance Type. Larger instances will be able to accomodate more users
+    Type: String
+    Default: g4dn.xlarge
+    AllowedValues: [g4dn.xlarge, g4dn.2xlarge, g4dn.4xlarge, g4dn.8xlarge, g4dn.16xlarge]
+
+Conditions:
+  IsRoute53ManagedCondition:
+    Fn::Equals: [!Ref IsRoute53Managed, "yes"]
+  IsNotRoute53ManagedCondition:
+    Fn::Not: 
+      - Condition: IsRoute53ManagedCondition
+
+Mappings:
+  RegionMap:
+    me-south-1:
+      AMI: ami-0e1537ca21a58e2a1
+    sa-east-1:
+      AMI: ami-0edee1b62493a99b0
+    ca-west-1:
+      AMI: ami-0012142629a6de87a
+    ap-southeast-1:
+      AMI: ami-02fe1064b528b9774
+    ap-east-1:
+      AMI: ami-0951e69b074cad160
+    ap-northeast-1:
+      AMI: ami-03d9b1f62c7b99017
+    us-east-1:
+      AMI: ami-09a1c459d70c72b96
+    cn-northwest-1:
+      AMI: ami-0433b8ef56ff383ed
+    cn-north-1:
+      AMI: ami-0867f8f30e2cf85c3
+    il-central-1:
+      AMI: ami-0fd9b8dc75bcb7b4a
+    ap-south-1:
+      AMI: ami-053f2979ba3826edf
+    eu-south-1:
+      AMI: ami-08ecf9619db5cca63
+    eu-west-1:
+      AMI: ami-0302d9d8443f785d8
+    eu-north-1:
+      AMI: ami-02ffde950ebf433fd
+    me-central-1:
+      AMI: ami-0a29590ad1c5bcd9e
+    us-west-1:
+      AMI: ami-04b7b2eb8c31dd2d1
+    ca-central-1:
+      AMI: ami-0c0ea8a1b7d93b6d5
+    eu-central-1:
+      AMI: ami-0556dfb1a147512ba
+    af-south-1:
+      AMI: ami-0cb0dc159fadbe5ea
+    ap-northeast-2:
+      AMI: ami-0bef3128c92cde1d8
+    ap-southeast-2:
+      AMI: ami-0f2e060187bfb463d
+    us-east-2:
+      AMI: ami-0731755794ada3662
+    eu-south-2:
+      AMI: ami-04e416ccc247ee76c
+    eu-central-2:
+      AMI: ami-0c759080d0fbd65c6
+    ap-south-2:
+      AMI: ami-06342621c6c9586ab
+    eu-west-2:
+      AMI: ami-00b2b33fc1d323a54
+    us-west-2:
+      AMI: ami-01f519a731dd64ba7
+    ap-northeast-3:
+      AMI: ami-068efdbcd0bd49bfc
+    ap-southeast-3:
+      AMI: ami-0e6bfbecca5e5e3f6
+    eu-west-3:
+      AMI: ami-0568a5e1a2e506718
+    ap-southeast-4:
+      AMI: ami-0f5880f9cf5a38084
+    ap-southeast-5:
+      AMI: ami-02578284ecd90da8e
+
+Resources:
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties: 
+      RoleName: !Sub "${AWS::StackName}-LambdaExecutionRole"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaBasicExecution
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - route53:ListHostedZonesByName
+                Resource: "*"
+
+  GetHostedZoneIdFunction:
+    Type: AWS::Lambda::Function
+    Condition: IsRoute53ManagedCondition
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          const response = require('cfn-response');
+          const { Route53 } = require('@aws-sdk/client-route-53');
+          const route53 = new Route53();
+
+
+          exports.handler = async (event, context) => {
+              const domainName = event.ResourceProperties.DomainName;
+
+              const hostedZones = await route53.listHostedZonesByName({ DNSName: domainName });
+              console.log("hostedZones: ", hostedZones);
+              if (!hostedZones.HostedZones.length) {
+                  throw new Error(`No hosted zone found for domain ${domainName}`);
+              }
+              var hostedZoneId = hostedZones.HostedZones[0].Id;
+              hostedZoneId = (hostedZoneId.match(/\/hostedzone\/([A-Z0-9]+)/) || [])[1];
+              console.log("returning: ", hostedZoneId)
+              await response.send(event, context, response.SUCCESS, {hostedZoneId});
+              console.log("done");
+          };
+      Runtime: nodejs20.x
+
+  HostedZoneIdFunctionPermission:
+    Type: AWS::Lambda::Permission
+    Condition: IsRoute53ManagedCondition
+    Properties:
+      FunctionName: !Ref GetHostedZoneIdFunction
+      Action: lambda:InvokeFunction
+      Principal: cloudformation.amazonaws.com
+
+  HostedZoneId:
+    Type: Custom::LoadLambda
+    Condition: IsRoute53ManagedCondition
+    Properties:
+      ServiceToken: !GetAtt GetHostedZoneIdFunction.Arn
+      DomainName: !Ref DomainName
+
+  RandomStringGeneratorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          const crypto = require('crypto');
+          const response = require('cfn-response');
+
+          exports.handler = async (event, context) => {
+              try {
+                  const length = parseInt(event.ResourceProperties.Length, 10) || 12;
+                  const randomString = crypto.randomBytes(Math.ceil(length / 2)).toString('hex').slice(0, length);
+
+                  const responseData = {
+                      RandomString: randomString
+                  };
+
+                  await response.send(event, context, response.SUCCESS, responseData);
+              } catch (error) {
+                  console.log('Error generating random string: ', error);
+                  await response.send(event, context, response.FAILED);
+              }
+          };
+      Runtime: nodejs20.x
+
+  RandomStringGeneratorFunctionPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref RandomStringGeneratorFunction
+      Action: lambda:InvokeFunction
+      Principal: cloudformation.amazonaws.com
+
+  LiveKitAccessKey:
+    Type: Custom::RandomString
+    Properties:
+      ServiceToken: !GetAtt RandomStringGeneratorFunction.Arn
+      Length: 15
+
+  LiveKitAccessKeyID:
+    Type: Custom::RandomString
+    Properties:
+      ServiceToken: !GetAtt RandomStringGeneratorFunction.Arn
+      Length: 45
+
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.153.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Join ['', [!Ref "AWS::StackName", "-VPC" ]]
+   
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    DependsOn: VPC
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.153.10.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-Public
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-Public
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway  
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allows ssh, rtmp and http/s connections to host
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443 
+          ToPort: 443 
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 8443
+          ToPort: 8443
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 7881
+          ToPort: 7881
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 8087
+          ToPort: 8087
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: udp
+          FromPort: 3478
+          ToPort: 3478
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 5349
+          ToPort: 5349
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: udp
+          FromPort: 50000
+          ToPort: 60000
+          CidrIp: 0.0.0.0/0
+
+  Server:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !FindInMap [RegionMap, !Ref "AWS::Region", AMI]
+      SubnetId: !Ref PublicSubnet
+      SecurityGroupIds:
+        - !Ref SecurityGroup
+      KeyName: wpstream
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          mkdir /opt/larynx-init/
+          cd /opt/larynx-init/
+          wget https://lostshadow.s3.amazonaws.com/self-contained-ai-voice-assistant/init/init_viewer.py
+          chmod +x init_viewer.py
+          touch init_log.txt
+          echo "#" > init_log.txt
+          nohup python3 init_viewer.py > ./init_viewer.log 2>&1 &
+          wget https://lostshadow.s3.amazonaws.com/self-contained-ai-voice-assistant/init/setup_components.sh
+          chmod +x setup_components.sh
+          ./setup_components.sh ${DomainName} ${AWS::StackName} ${LiveKitAccessKey.RandomString} ${LiveKitAccessKeyID.RandomString} >> init_log.txt 2>&1
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: 100  # 100 GB
+            VolumeType: gp3
+            Iops: 5000
+      Tags: 
+        - 
+          Key: "Name"
+          Value: !Sub "${AWS::StackName}-Server"
+
+  DNSRecord1:
+    Type: AWS::Route53::RecordSet
+    Condition: IsRoute53ManagedCondition
+    Properties:
+      HostedZoneId: !GetAtt HostedZoneId.hostedZoneId
+      Name:
+        Fn::Join:
+        - "."
+        - - !Ref AWS::StackName
+          - !Ref DomainName
+      Type: A
+      TTL: '300'
+      ResourceRecords:
+        - !GetAtt Server.PublicIp
+
+  DNSRecord2:
+    Type: AWS::Route53::RecordSet
+    Condition: IsRoute53ManagedCondition
+    Properties:
+      HostedZoneId: !GetAtt HostedZoneId.hostedZoneId
+      Name:
+        Fn::Join:
+          - "."
+          - - "turn"
+            - !Ref AWS::StackName
+            - !Ref DomainName
+      Type: A
+      TTL: '300'
+      ResourceRecords:
+        - !GetAtt Server.PublicIp
+
+Outputs:
+  InitalizationProgressPageLink:
+    Description: Link to a simple web page that shows initialization progress
+    Value: !Sub "http://${Server.PublicIp}:8087"
+  VoiceAssistantLink:
+    Description: Link to Voice Assistant Page
+    Value: !Sub "https://${AWS::StackName}.${DomainName}"
+  MainSubdomainDNSInstructions:
+    Description: "Instructions for setting up DNS for the main subdomain"
+    Condition: IsNotRoute53ManagedCondition
+    Value: !Sub |
+      Please create the following A record:
+      ${AWS::StackName}.${DomainName} pointing to ${Server.PublicIp}
+  TurnSubdomainDNSInstructions:
+    Description: "Instructions for setting up DNS for the turn subdomain"
+    Condition: IsNotRoute53ManagedCondition
+    Value: !Sub |
+      Please create the following A record:
+      turn.${AWS::StackName}.${DomainName} pointing to ${Server.PublicIp}
